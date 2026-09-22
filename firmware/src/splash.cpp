@@ -20,6 +20,19 @@
 // frame centered on the 60×60 stage. The oversized stage leaves room to later
 // translate animations across the screen (walks, lurking).
 #define GRID         SPLASH_GRID
+
+// Stage size in cells. Square (GRID x GRID) by default; a board with a
+// non-square panel sets SPLASH_STAGE_W / SPLASH_STAGE_H in its build flags so
+// the art fills the panel at an integer cell size instead of letterboxing in a
+// square. Only the PSRAM-less direct-draw path supports a non-square stage.
+#ifndef SPLASH_STAGE_W
+#define SPLASH_STAGE_W GRID
+#endif
+#ifndef SPLASH_STAGE_H
+#define SPLASH_STAGE_H GRID
+#endif
+#define STAGE_W      SPLASH_STAGE_W
+#define STAGE_H      SPLASH_STAGE_H
 static int  cell      = 8;         // recomputed in splash_init()
 static int  canvas_w  = GRID * 8;
 static int  canvas_h  = GRID * 8;
@@ -69,15 +82,21 @@ static const char* GROUP_NAMES[GROUP_COUNT][GROUP_MAX] = {
 
 // Scratch stage: the current animation frame composed centered onto the full
 // 60×60 grid (index 0 = background elsewhere). 3.6 KB of static RAM.
-static uint8_t stage_cells[GRID * GRID];
+static uint8_t stage_cells[STAGE_W * STAGE_H];
 
 // The official 55×37 art stage sits at a fixed anchor on the 60×60 grid, and
 // every animation is placed at its authored stage offset (ox/oy) — never
 // centered per-animation. All animations share one idle-Clawd position
 // (x 15..38, y 21..36 in stage cells), so transitions between them are
 // seamless; centering per-crop would make the still pose jump around.
-#define STAGE_ANCHOR_X ((GRID - 55) / 2)
-#define STAGE_ANCHOR_Y ((GRID - 37) / 2)
+#define STAGE_ANCHOR_X ((STAGE_W - 55) / 2)
+#if STAGE_H == SPLASH_GRID
+#define STAGE_ANCHOR_Y ((STAGE_H - 37) / 2)
+#else
+// Non-square stage: bottom-align the art (every animation touches the ground
+// line at row 37 of the official stage) so the rows above it aren't wasted.
+#define STAGE_ANCHOR_Y (STAGE_H - 37)
+#endif
 
 // ─── Playback: intro → loop → outro ─────────────────────────────────────────
 // Every animation carries a loop region (converter-detected gait cycles and
@@ -177,7 +196,7 @@ static void walk_choreo(const splash_anim_def_t *a) {
     const uint32_t now = millis();
     switch (walk_phase) {
         case 0:  // standing at home
-            if (now - walk_phase_started > 1200) { walk_phase = 1; walk_begin(GRID - a->w); }
+            if (now - walk_phase_started > 1200) { walk_phase = 1; walk_begin(STAGE_W - a->w); }
             break;
         case 1:  // arrived at the right edge
             walk_phase = 2; walk_phase_started = now;
@@ -206,23 +225,23 @@ static const uint8_t* compose_stage(const splash_anim_def_t *a, uint16_t frame) 
     // vertical placement should stay anchored (rounded panel corners).
     int ax = STAGE_ANCHOR_X + a->ox;
     if (a->ox == 0)           ax = 0;
-    if (a->ox + a->w == 55)   ax = GRID - a->w;
+    if (a->ox + a->w == 55)   ax = STAGE_W - a->w;
     if (walk_active)          ax = walk_x;
     const bool mirror = walk_active && walk_face < 0;
     const int ay = STAGE_ANCHOR_Y + a->oy;
     const uint8_t *src = &a->frames[(size_t)frame * a->w * a->h];
     for (int r = 0; r < a->h; r++) {
         const int dy = ay + r;
-        if (dy < 0 || dy >= GRID) continue;
+        if (dy < 0 || dy >= STAGE_H) continue;
         int c0 = 0, c1 = a->w;                 // clip for partial off-screen x
         if (ax + c0 < 0)     c0 = -ax;
-        if (ax + c1 > GRID)  c1 = GRID - ax;
+        if (ax + c1 > STAGE_W)  c1 = STAGE_W - ax;
         if (c0 >= c1) continue;
         if (mirror) {
             for (int c = c0; c < c1; c++)
-                stage_cells[dy * GRID + ax + c] = src[r * a->w + (a->w - 1 - c)];
+                stage_cells[dy * STAGE_W + ax + c] = src[r * a->w + (a->w - 1 - c)];
         } else {
-            memcpy(&stage_cells[dy * GRID + ax + c0], &src[r * a->w + c0], c1 - c0);
+            memcpy(&stage_cells[dy * STAGE_W + ax + c0], &src[r * a->w + c0], c1 - c0);
         }
     }
     return stage_cells;
@@ -271,7 +290,7 @@ static uint16_t*       strip_buf = NULL;   // one grid-row band: (GRID*scr_cell)
 static int             scr_cell  = 24;     // on-screen px per grid cell
 static int             scr_offx  = 0;      // centering offsets (square art on panel)
 static int             scr_offy  = 0;
-static uint8_t         prev_cells[GRID * GRID];
+static uint8_t         prev_cells[STAGE_W * STAGE_H];
 static const uint16_t* prev_palette = NULL;
 static bool            prev_valid   = false;
 static bool            force_full   = false;  // repaint everything on the next render
@@ -286,7 +305,7 @@ static void blit_cells(const uint8_t* cells, const uint16_t* palette,
     const int px  = scr_offx + gx0 * spc;
     for (int gy = gy0; gy <= gy1; gy++) {
         for (int gx = gx0; gx <= gx1; gx++) {       // expand one source row across
-            uint8_t code = cells[gy * GRID + gx];
+            uint8_t code = cells[gy * STAGE_W + gx];
             uint16_t color = (palette && code < SPLASH_PALETTE_SIZE) ? palette[code] : COL_EMPTY;
             uint16_t* p = &strip_buf[(gx - gx0) * spc];
             for (int i = 0; i < spc; i++) p[i] = color;
@@ -303,12 +322,12 @@ static void render_frame(const uint8_t *cells, const uint16_t *palette) {
     bool full = force_full || !prev_valid || palette != prev_palette;
     force_full = false;
 
-    int gx0 = 0, gy0 = 0, gx1 = GRID - 1, gy1 = GRID - 1;
+    int gx0 = 0, gy0 = 0, gx1 = STAGE_W - 1, gy1 = STAGE_H - 1;
     if (!full) {                                     // bounding box of changed cells
-        gx0 = GRID; gy0 = GRID; gx1 = -1; gy1 = -1;
-        for (int gy = 0; gy < GRID; gy++)
-            for (int gx = 0; gx < GRID; gx++)
-                if (cells[gy * GRID + gx] != prev_cells[gy * GRID + gx]) {
+        gx0 = STAGE_W; gy0 = STAGE_H; gx1 = -1; gy1 = -1;
+        for (int gy = 0; gy < STAGE_H; gy++)
+            for (int gx = 0; gx < STAGE_W; gx++)
+                if (cells[gy * STAGE_W + gx] != prev_cells[gy * STAGE_W + gx]) {
                     if (gx < gx0) gx0 = gx;
                     if (gx > gx1) gx1 = gx;
                     if (gy < gy0) gy0 = gy;
@@ -319,12 +338,15 @@ static void render_frame(const uint8_t *cells, const uint16_t *palette) {
 
     blit_cells(cells, palette, gx0, gy0, gx1, gy1);
 
-    memcpy(prev_cells, cells, GRID * GRID);
+    memcpy(prev_cells, cells, STAGE_W * STAGE_H);
     prev_palette = palette;
     prev_valid   = true;
 }
 
 #else  // ── PSRAM: LVGL canvas render (unchanged) ──
+
+static_assert(STAGE_W == GRID && STAGE_H == GRID,
+              "non-square splash stage is only supported on the direct-draw (PSRAM-less) path");
 
 static void render_frame(const uint8_t *cells, const uint16_t *palette) {
     if (!row_buf || !canvas_buf) return;
@@ -676,13 +698,18 @@ void splash_init(lv_obj_t *parent) {
 #if SPLASH_DIRECT_DRAW
     // Direct-to-panel path (no PSRAM): no LVGL canvas. Compute on-screen cell
     // size + centering, and a scratch band buffer sized for one grid-row strip
-    // across the square art (GRID*scr_cell × scr_cell). On the C6 that's
+    // across the stage (STAGE_W*scr_cell × scr_cell). On the C6 AMOLED that's
     // 480×24×2 ≈ 23 KB of internal SRAM.
-    int mind = (c.width < c.height) ? c.width : c.height;
-    scr_cell = mind / GRID;
-    int side = GRID * scr_cell;
-    scr_offx = (c.width  - side) / 2;
-    scr_offy = (c.height - side) / 2;
+    // Largest integer cell that fits the stage on the panel; for the default
+    // square stage that is min(w, h) / GRID, as before.
+    const int cw = c.width  / STAGE_W;
+    const int ch = c.height / STAGE_H;
+    scr_cell = (cw < ch) ? cw : ch;
+    if (scr_cell < 1) scr_cell = 1;
+    const int side   = STAGE_W * scr_cell;   // stage width on screen, px
+    const int side_h = STAGE_H * scr_cell;
+    scr_offx = (c.width  - side)   / 2;
+    scr_offy = (c.height - side_h) / 2;
     strip_buf = (uint16_t*)heap_caps_malloc((size_t)side * scr_cell * 2,
                                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!strip_buf) {

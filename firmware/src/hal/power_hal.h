@@ -18,6 +18,11 @@ bool power_hal_is_vbus_in(void);   // USB cable present (true even without a bat
 // Edge-triggered: returns true once per PWR short-press, then clears.
 bool power_hal_pwr_pressed(void);
 
+// Edge-triggered: true once per PWR double-press, then clears. Optional: boards
+// without a touchscreen use it to toggle splash <-> usage. A weak default
+// (hal/power_hal_defaults.cpp) returns false, so other boards need not define it.
+bool power_hal_pwr_double_pressed(void);
+
 // Edge-triggered: true once when a PWR hold crosses the long-press threshold
 // (~1.5s), then clears. Starts the hold-to-pair gesture.
 bool power_hal_pwr_long_pressed(void);

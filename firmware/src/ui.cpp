@@ -34,6 +34,7 @@ struct Layout {
     // Usage screen
     int16_t usage_panel_h;
     int16_t usage_panel_gap;
+    bool    usage_side_by_side;      // Current / Weekly panels left|right instead of stacked
     int16_t usage_bar_y;
     int16_t usage_reset_y;
     int16_t bar_h;
@@ -47,6 +48,7 @@ struct Layout {
     const lv_font_t* pace_font;      // enterprise "Under/On/Over pace" line
     const lv_font_t* anim_font;      // animated status line
     int16_t anim_y;                  // status line offset from bottom
+    uint8_t anim_max_word;           // longest whimsical status word shown (narrow screens skip longer ones)
     bool    small_icons;             // 40px logo + 24px battery (vs 80/48) on small screens
     int16_t title_nudge;             // title x-shift balancing the corner logo
     int16_t logo_y;                  // logo top edge
@@ -93,6 +95,8 @@ static void compute_layout(const BoardCaps& c) {
     L.pace_font    = &font_styrene_16;
     L.anim_font    = &font_mono_32;
     L.anim_y = -15;
+    L.anim_max_word = 255;   // no limit
+    L.usage_side_by_side = false;
     L.small_icons = false;
     L.title_nudge = 16;
     L.logo_y = L.title_y - 10;
@@ -103,7 +107,52 @@ static void compute_layout(const BoardCaps& c) {
     L.pair_y3 = 160;
     L.idle_px = 160;
 
-    if (c.height >= 460) {
+    if (c.width > c.height && c.height <= 200) {
+        // Short-landscape layout — tuned for 320x172 (LCD-1.47 rotated to
+        // landscape). Height is the constraint: two stacked panels would need
+        // more than the whole screen, so the Current / Weekly panels sit side by
+        // side. Inner panel width is ~132 px, so every string was measured from
+        // the compiled fonts rather than guessed ("Resets in 23h 59m" = 129 px).
+        // Boards on this tier have no battery indicator, so the title centers on
+        // the full width with only the corner mascot to its left.
+        L.margin = 8;
+        L.title_y = 3;
+        L.content_y = 44;
+        L.usage_side_by_side = true;
+        L.usage_panel_h = 92;
+        L.usage_panel_gap = 8;
+        L.usage_bar_y = 34;
+        L.usage_reset_y = 56;
+        L.bar_h = 12;
+        L.panel_pad_x = 8;
+        L.panel_pad_y = 8;
+        L.pill_pad_x = 6;
+        L.pill_pad_y = 2;
+        L.title_font   = &font_tiempos_34;   // "12:34 PM" = 140 px, plenty of room
+        L.pct_font     = &font_styrene_24;
+        L.ent_pct_font = &font_tiempos_34;
+        L.pill_font    = &font_styrene_12;
+        L.reset_font   = &font_styrene_14;
+        L.pace_font    = &font_styrene_12;
+        L.anim_font    = &font_mono_18;
+        L.anim_y = -8;
+        L.small_icons = true;
+        L.title_nudge = 8;
+        L.logo_y = 2;
+        L.batt_y = 10;
+        L.batt_w = ICON_BATTERY_SMALL_W;
+        L.pair_y1 = 10;
+        L.pair_y2 = 44;
+        L.pair_y3 = 64;
+        L.idle_px = 80;
+        L.bt_info_panel_h = 90;
+        L.bt_reset_zone_h = 60;
+        L.bt_title_font    = &font_tiempos_34;
+        L.bt_status_font   = &font_styrene_20;
+        L.bt_device_font   = &font_styrene_14;
+        L.bt_credit_1_font = &font_styrene_12;
+        L.bt_credit_2_font = &font_styrene_12;
+    } else if (c.height >= 460) {
         // Large layout — tuned for 480x480 (AMOLED-2.16).
         L.content_y = 100;
         L.usage_panel_h = 150;
@@ -388,10 +437,10 @@ static void init_battery_icons(void) {
 
 // ======== Usage Screen ========
 
-static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
+static lv_obj_t* make_usage_panel(lv_obj_t* parent, int x, int y, int w, const char* pill_text,
                                   lv_obj_t** out_pct, lv_obj_t** out_pill,
                                   lv_obj_t** out_bar, lv_obj_t** out_reset) {
-    lv_obj_t* panel = make_panel(parent, L.margin, y, L.content_w, L.usage_panel_h);
+    lv_obj_t* panel = make_panel(parent, x, y, w, L.usage_panel_h);
 
     *out_pct = lv_label_create(panel);
     lv_label_set_text(*out_pct, "---%");
@@ -403,7 +452,7 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
     lv_obj_align(*out_pill, LV_ALIGN_TOP_RIGHT, 0, 1);
 
     *out_bar = make_bar(panel, 0, L.usage_bar_y,
-                        L.content_w - 2 * L.panel_pad_x, L.bar_h);
+                        w - 2 * L.panel_pad_x, L.bar_h);
 
     *out_reset = lv_label_create(panel);
     lv_label_set_text(*out_reset, "---");
@@ -436,12 +485,16 @@ static void build_pair_group(lv_obj_t* parent) {
     lv_label_set_text(l2, "hold the power button");
     lv_obj_set_style_text_font(l2, L.bt_device_font, 0);
     lv_obj_set_style_text_color(l2, COL_DIM, 0);
+    lv_obj_set_width(l2, L.scr_w - 2 * L.margin);            // wrap on narrow screens
+    lv_obj_set_style_text_align(l2, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(l2, LV_ALIGN_TOP_MID, 0, L.pair_y2);
 
     lv_obj_t* l3 = lv_label_create(pair_group);
     lv_label_set_text(l3, "for 3 seconds, then release");
     lv_obj_set_style_text_font(l3, L.bt_device_font, 0);
     lv_obj_set_style_text_color(l3, COL_DIM, 0);
+    lv_obj_set_width(l3, L.scr_w - 2 * L.margin);
+    lv_obj_set_style_text_align(l3, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(l3, LV_ALIGN_TOP_MID, 0, L.pair_y3);
 
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);  // ui_update_ble_status decides
@@ -498,7 +551,14 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
-    panel_session = make_usage_panel(usage_group, L.content_y, "Current",
+    // Stacked (default): both panels full width. Side by side (short-landscape
+    // boards): two half-width panels on one row.
+    const int panel_w  = L.usage_side_by_side ? (L.content_w - L.usage_panel_gap) / 2 : L.content_w;
+    const int weekly_x = L.usage_side_by_side ? L.margin + panel_w + L.usage_panel_gap : L.margin;
+    const int weekly_y = L.usage_side_by_side ? L.content_y
+                                              : L.content_y + L.usage_panel_h + L.usage_panel_gap;
+
+    panel_session = make_usage_panel(usage_group, L.margin, L.content_y, panel_w, "Current",
                      &lbl_session_pct, &lbl_session_label,
                      &bar_session, &lbl_session_reset);
 
@@ -522,8 +582,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_pos(lbl_spending_status, 0, L.usage_reset_y + 20);
     lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
 
-    panel_weekly = make_usage_panel(usage_group,
-                     L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
+    panel_weekly = make_usage_panel(usage_group, weekly_x, weekly_y, panel_w, "Weekly",
                      &lbl_weekly_pct, &lbl_weekly_label,
                      &bar_weekly, &lbl_weekly_reset);
     // Recolor enabled so enterprise period box can color pace and reset separately
@@ -544,6 +603,8 @@ static void init_usage_screen(lv_obj_t* scr) {
 
 void ui_init(void) {
     compute_layout(board_caps());
+    while (strlen(anim_messages[anim_msg_idx]) > L.anim_max_word)   // start on a word that fits
+        anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
 
     lv_obj_t* scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
@@ -727,7 +788,9 @@ void ui_tick_anim(void) {
     }
 
     if (now - anim_msg_start >= ANIM_MSG_MS) {
-        anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
+        do {
+            anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;
+        } while (strlen(anim_messages[anim_msg_idx]) > L.anim_max_word);
         anim_msg_start = now;
     }
 
