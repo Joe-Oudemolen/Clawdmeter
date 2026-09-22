@@ -349,6 +349,12 @@ void loop() {
             }
         }
 
+        // Boards with no touchscreen synthesize a double-press to flip
+        // splash <-> usage (touch does this on the others).
+        if (power_hal_pwr_double_pressed()) {
+            if (!idle_consume_wake_press()) ui_toggle_splash();
+        }
+
         pair_tick();
     }
 

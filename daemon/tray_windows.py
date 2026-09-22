@@ -239,11 +239,26 @@ def main() -> None:
         #
         # Set _quit_requested FIRST so the supervisor loop in _run_daemon never
         # resurrects the daemon after we signal stop (Quit must be final).
+        #
+        # pystray runs this callback ON its Win32 message-loop thread, so doing the
+        # join + stop() inline blocks the very loop that has to process the stop
+        # message: on some machines Quit then left the process alive with the
+        # daemon already stopped (logged "Stopping", pythonw.exe never exited).
+        # Do the shutdown on a worker thread instead, and force the exit if
+        # pystray's loop still has not returned shortly after stop().
         _quit_requested.set()
-        if ts.loop is not None and ts.stop_event is not None:
-            ts.loop.call_soon_threadsafe(ts.stop_event.set)
-            daemon_thread.join(timeout=6.0)
-        icon_ref.stop()
+
+        def _shutdown() -> None:
+            if ts.loop is not None and ts.stop_event is not None:
+                ts.loop.call_soon_threadsafe(ts.stop_event.set)
+                daemon_thread.join(timeout=6.0)
+            icon_ref.stop()
+            # The daemon has disconnected cleanly by now; if the main thread is
+            # still parked in the message loop, exit anyway so Quit is final.
+            time.sleep(2.0)
+            os._exit(0)
+
+        threading.Thread(target=_shutdown, name="clawdmeter-quit", daemon=True).start()
 
     def _on_toggle(_icon_ref, _item) -> None:
         if autostart.is_enabled():
